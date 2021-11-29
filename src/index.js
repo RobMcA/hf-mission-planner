@@ -5,13 +5,15 @@ import { select, event } from 'd3-selection'
 
 import './index.css'
 import HFMap from '../assets/hf.png'
-import HF4Map from '../assets/hf4.png'
+import HF4Map from '../assets/hf4.jpg'
 import { dijkstra } from './dijkstra'
-import { PathInfo } from './PathInfo'
+import { Overlay } from './Overlay'
 import { MapData } from './MapData'
 
+const isHF3 = location.search === '?ed=3'
+
 const map = new Image
-map.src = HF4Map
+map.src = isHF3 ? HFMap : HF4Map
 main.textContent = 'loading...'
 
 const canvas = document.createElement('canvas')
@@ -27,8 +29,11 @@ map.onload = () => {
   const z = zoom()
     .scaleExtent([0.2, 1.5])
     .translateExtent([[0,0],[map.width,map.height]])
+    .filter(() => {
+      return !event.ctrlKey && !event.button && event.target.tagName === 'CANVAS'
+    })
     .on("zoom", () => zoomed(event.transform))
-  select(document.documentElement).call(z).call(z.translateTo, 4600, 2900)
+  select(document.documentElement).call(z).call(z.translateTo, 0.85 * canvas.width, 0.80 * canvas.height)
   draw()
 }
 
@@ -39,6 +44,11 @@ function zoomed({x, y, k}) {
 
 let editing = false
 let mapData = null
+let connecting = null
+let highlightedPath = null
+let venus = false
+let pathOrigin = null
+let pathData = null
 
 const loadData = (json) => {
   mapData = MapData.fromJSON(json)
@@ -48,7 +58,11 @@ const loadData = (json) => {
 if ('data' in localStorage) {
   loadData(JSON.parse(localStorage.data))
 } else if (location.protocol !== 'file:') {
-  import('../assets/data-hf4.json').then(({default: data}) => loadData(data))
+  if (isHF3) {
+    import('../assets/data.json').then(({default: data}) => loadData(data))
+  } else {
+    import('../assets/data-hf4.json').then(({default: data}) => loadData(data))
+  }
 }
 
 function changed() {
@@ -70,17 +84,40 @@ canvas.onclick = e => {
     draw()
   } else {
     const closestId = nearestPoint(mousePos.x, mousePos.y, id => mapData.points[id].type !== 'decorative')
-    if (pathing) {
-      if (closestId && closestId !== pathing) {
-        console.time('finding path')
-        highlightedPath = findPath(pathing, closestId)
-        console.timeEnd('finding path')
-        pathing = null
-      }
+    if (!closestId) { return }
+
+    if (canPath(closestId)) {
+      highlightedPath = drawPath(pathData, pathOrigin, closestId)
+      endPathing()
     } else {
-      if (closestId) pathing = closestId
+      beginPathing(closestId) 
     }
+
     draw()
+  }
+}
+
+function beginPathing(originId) {
+  pathOrigin = originId
+  pathData = findPath(originId)
+}
+
+function canPath(closestId) {
+  return closestId && pathOrigin && closestId !== pathOrigin
+}
+
+function endPathing() {
+  pathOrigin = null
+  pathData = null
+}
+
+function refreshPath() {
+  if (pathOrigin && pathData) {
+    const closestId = nearestPoint(mousePos.x, mousePos.y, id => mapData.points[id].type !== 'decorative')
+
+    if (canPath(closestId)) {
+      highlightedPath = drawPath(pathData, pathOrigin, closestId)
+    }
   }
 }
 
@@ -88,6 +125,8 @@ const mousePos = {x: 0, y: 0} // pct
 canvas.onmousemove = e => {
   mousePos.x = e.offsetX / canvas.width
   mousePos.y = e.offsetY / canvas.height
+
+  refreshPath()
   draw()
 }
 
@@ -144,17 +183,11 @@ function nearestEdge(testX, testY) {
   }
 }
 
-let connecting = null
-let pathing = null
-let highlightedPath = null
-let debugPathfinding = null
-
 window.onkeydown = e => {
   if (e.code === 'Escape') {
     connecting = null
-    pathing = null
+    pathOrigin = null
     highlightedPath = null
-    debugPathfinding = null
   }
   if (editing) {
     if (e.code === 'KeyA') { // Add edge
@@ -248,11 +281,22 @@ window.onkeydown = e => {
         changed()
       }
     }
+    if (e.code === 'KeyV') { // Set point type to be venus
+      const closestId = nearestPoint(mousePos.x, mousePos.y)
+      if (closestId) {
+        mapData.points[closestId].type = 'venus'
+        mapData.points[closestId].flybyBoost = ((mapData.points[closestId].flybyBoost || 0) % 4) + 1
+        changed()
+      }
+    }
     if (e.code === 'KeyS') { // Set point type to site
       const closestId = nearestPoint(mousePos.x, mousePos.y)
       if (closestId) {
-        mapData.points[closestId].type = 'site'
-        mapData.points[closestId].siteName = prompt("Site name", mapData.points[closestId].siteName)
+        const p = mapData.points[closestId]
+        p.type = 'site'
+        p.siteName = prompt("Site name", p.siteName)
+        p.siteSize = prompt("Site size + type", p.siteSize)
+        p.siteWater = prompt("Site water", p.siteWater)
         changed()
       }
     }
@@ -267,6 +311,15 @@ window.onkeydown = e => {
         changed()
       }
     }
+  } else {
+    if (e.code === 'KeyV') {
+      venus = !venus
+      if (pathData) {
+        beginPathing(pathOrigin)
+        refreshPath()
+        draw()
+      }
+    }
   }
 
   if (e.code === 'Tab') { // Toggle edit mode
@@ -274,28 +327,6 @@ window.onkeydown = e => {
     e.preventDefault()
   }
 
-  if (e.code === 'KeyF') { // Find path
-    const closestId = nearestPoint(mousePos.x, mousePos.y)
-    if (pathing) {
-      if (closestId && closestId !== pathing) {
-        console.time('finding path')
-        highlightedPath = findPath(pathing, closestId)
-        console.timeEnd('finding path')
-        pathing = null
-      }
-    } else {
-      if (closestId) pathing = closestId
-    }
-  }
-  if (e.code === 'Backquote') {
-    const pId = nearestPoint(mousePos.x, mousePos.y)
-    if (pId) {
-      const id = p => p.dir != null ? `${p.node}@${p.dir}` : p.node
-      const source = {node: pId, dir: null, bonus: 0}
-      debugPathfinding = dijkstra(getNeighbors, burnWeight, ints, id, source, allowed)
-      draw()
-    }
-  }
   draw()
 }
 
@@ -307,16 +338,16 @@ function allowed(u, v, id, previous) {
     // Once you enter a site, your turn ends.
     return false
   }
-  // look back through |previous| starting from |v| to see if [u,v] has already
-  // been traversed.
+  // Find the last node we were in.
   let n = u
   let p
   while (p = previous[id(n)]) {
-    if ((n.node === uId && p.node === vId) || (n.node === vId && p.node === uId))
-      return false
+    if (p.node !== uId) break
     n = p
   }
-  return true
+  // If the last node we entered is the same as where we just came from, this
+  // transition is forbidden. (H4e. No U-Turns)
+  return !p || p.node !== vId
 }
 
 function getNeighbors(p) {
@@ -345,8 +376,11 @@ function getNeighbors(p) {
     if (!(node in edgeLabels) || !(other in edgeLabels[node]) || edgeLabels[node][other] === dir) {
       const dir = edgeLabels[other] && edgeLabels[other][node] ? edgeLabels[other][node] : null
       const entryCost = points[other].type === 'burn' ? 1 : 0
-      const flybyBoost = points[other].type === 'flyby' ? points[other].flybyBoost : 0
+      const flybyBoost = points[other].type === 'flyby' || points[other].type === 'venus' ? points[other].flybyBoost : 0
       const bonusAfterEntry = Math.max(bonus - entryCost + flybyBoost, 0)
+      if (points[other].type === 'venus' && !venus) {
+        return
+      }
       ns.push({node: other, dir, bonus: bonusAfterEntry})
     }
   })
@@ -379,7 +413,7 @@ function burnWeight(u, v) {
     return bonus > 0 && !points[vId].landing ? 0 : 1
   } else if (points[vId].type === 'hohmann') {
     return uId === vId && uDir != null && vDir != null && uDir !== vDir ? Math.max(0, 2 - bonus) : 0;
-  } else if (points[vId].type === 'flyby') {
+  } else if (points[vId].type === 'flyby' || points[vId].type === 'venus') {
     return 0
   } else {
     return 0
@@ -417,7 +451,11 @@ function burnsTurnsHazardsSegments(u, v) {
   return [burns, turns, hazards, 1]
 }
 
-function findPath(fromId, toId) {
+function pathId(p) {
+  return p.dir != null || p.bonus ? `${p.node}@${p.dir}@${p.bonus}` : p.node
+}
+
+function findPath(fromId) {
   // NB for pathfinding along Hohmanns each
   // hohmann is kind of like two nodes, one for
   // each direction. Moving into either node is
@@ -431,23 +469,49 @@ function findPath(fromId, toId) {
   //    ,-'         `-
   // .-'
   // point: {node: string; dir: string?, id: string}
-  const id = p => p.dir != null || p.bonus ? `${p.node}@${p.dir}@${p.bonus}` : p.node
-  const source = {node: fromId, dir: null, bonus: 0}
-  const {distance, previous} = dijkstra(getNeighbors, burnsTurnsHazardsSegments, tuple4s, id, source, allowed)
+  console.time('calculating paths')
 
+  const source = {node: fromId, dir: null, bonus: 0}
+  const pathData = dijkstra(getNeighbors, burnsTurnsHazardsSegments, tuple4s, pathId, source, allowed)
+
+  console.timeEnd('calculating paths')
+
+  return pathData
+}
+
+function drawPath({ distance, previous }, fromId, toId) {
+  const source = {node: fromId, dir: null, bonus: 0}
+  
   let shorterTo = {node: toId, dir: null, bonus: 0}
-  let shorterToId = id(shorterTo)
+  let shorterToId = pathId(shorterTo)
 
   if (shorterToId in distance) {
     const path = [shorterTo]
     let cur = shorterTo
-    while (id(cur) !== id(source)) {
-      const n = previous[id(cur)]
+    while (pathId(cur) !== pathId(source)) {
+      const n = previous[pathId(cur)]
       path.unshift(n)
       cur = n
     }
+
     return path
   }
+}
+
+function pathWeight(path) {
+  let weight = tuple4s.zero
+  if (path) {
+    for (let i = 1; i < path.length; i++) {
+      weight = tuple4s.add(weight, burnsTurnsHazardsSegments(path[i-1], path[i]))
+    }
+  }
+  return weight
+}
+
+let isru = 0
+function setIsru(e) {
+  isru = e
+  draw()
 }
 
 function draw() {
@@ -488,6 +552,8 @@ function draw() {
         }
       } else if (p.type === 'radhaz') {
         ctx.fillStyle = 'yellow'
+      } else if (p.type === 'venus') {
+        ctx.fillStyle = 'orange'
       } else if (p.type === 'site') {
         ctx.fillStyle = 'black'
       } else if (p.type === 'burn') {
@@ -526,7 +592,7 @@ function draw() {
         ctx.fillText('☠︎', p.x * width, p.y * height)
         ctx.restore()
       }
-      if (p.type === 'flyby') {
+      if (p.type === 'flyby' || p.type === 'venus') {
         ctx.save()
         ctx.fillStyle = 'white'
         ctx.shadowOffsetX = 1
@@ -538,18 +604,14 @@ function draw() {
         ctx.fillText(`+${p.flybyBoost}`, p.x * width, p.y * height)
         ctx.restore()
       }
-
-      if (debugPathfinding) {
+      if (p.type === 'site') {
         ctx.save()
-        ctx.fillStyle = 'magenta'
-        ctx.font = '14px bold helvetica'
+        ctx.fillStyle = 'white'
+        ctx.font = '12px helvetica'
         ctx.textBaseline = 'middle'
         ctx.textAlign = 'center'
-        const {distance} = debugPathfinding
-        if (pId in edgeLabels) {
-        } else {
-          ctx.fillText(distance[pId], p.x * width, p.y * height)
-        }
+        ctx.fillText(`${p.siteSize}`, p.x * width, p.y * height - 6)
+        ctx.fillText(`${p.siteWater}`, p.x * width, p.y * height + 6)
         ctx.restore()
       }
 
@@ -575,6 +637,35 @@ function draw() {
       ctx.restore()
     }
   } else {
+    for (let pId in points) {
+      const p = points[pId]
+      if (p.type === 'venus') {
+        if (!venus) {
+          ctx.save()
+          ctx.lineWidth = 8
+          ctx.strokeStyle = "red"
+          ctx.lineCap = "round"
+          ctx.beginPath()
+          const r = 15
+          ctx.moveTo(p.x * width - r, p.y * height - r)
+          ctx.lineTo(p.x * width + r, p.y * height + r)
+          ctx.moveTo(p.x * width + r, p.y * height - r)
+          ctx.lineTo(p.x * width - r, p.y * height + r)
+          ctx.stroke()
+          ctx.restore()
+        }
+        ctx.save()
+        ctx.font = 'italic bold 14px helvetica'
+        ctx.fillStyle = 'white'
+        ctx.shadowColor = 'black'
+        ctx.shadowOffsetX = 1
+        ctx.shadowOffsetY = 1
+        ctx.textBaseline = 'bottom'
+        ctx.textAlign = 'center'
+        ctx.fillText(`Press [V] to toggle`, p.x * width, p.y * height - 25)
+        ctx.restore()
+      }
+    }
     const nearest = nearestPoint(mousePos.x, mousePos.y, id => points[id].type !== 'decorative')
     if (nearest != null) {
       const p = points[nearest]
@@ -588,8 +679,8 @@ function draw() {
       ctx.stroke()
       ctx.restore()
     }
-    if (pathing != null) {
-      const p = points[pathing]
+    if (pathOrigin != null) {
+      const p = points[pathOrigin]
       ctx.save()
       ctx.strokeStyle = "red"
       ctx.lineWidth = 4
@@ -599,6 +690,32 @@ function draw() {
       ctx.arc(p.x * width, p.y * height, 15, 0, 2*Math.PI)
       ctx.stroke()
       ctx.restore()
+
+      for (const pId in points) {
+        const p = points[pId]
+        if (p.type === 'site' && p.siteWater >= isru) {
+          ctx.save()
+          ctx.font = 'bold 70px helvetica'
+          ctx.shadowColor = 'black'
+          ctx.shadowOffsetX = 0
+          ctx.shadowOffsetY = 0
+          ctx.shadowBlur = 10
+          ctx.textBaseline = 'middle'
+          ctx.textAlign = 'center'
+          const path = drawPath(pathData, pathOrigin, pId)
+          const weight = pathWeight(path)[0]
+          const colors = [
+            '#ffffb2',
+            '#fecc5c',
+            '#fd8d3c',
+            '#f03b20',
+            '#bd0026',
+          ]
+          ctx.fillStyle = colors[Math.min(colors.length - 1, weight)]
+          ctx.fillText(weight, p.x * width, p.y * height)
+          ctx.restore()
+        }
+      }
     }
   }
   if (highlightedPath) {
@@ -617,11 +734,6 @@ function draw() {
     ctx.stroke()
     ctx.restore()
   }
-  let weight = tuple4s.zero
-  if (highlightedPath) {
-    for (let i = 1; i < highlightedPath.length; i++) {
-      weight = tuple4s.add(weight, burnsTurnsHazardsSegments(highlightedPath[i-1], highlightedPath[i]))
-    }
-  }
-  ReactDOM.render(React.createElement(PathInfo, {points: mapData.points, path: highlightedPath, weight}), overlay)
+  const weight = pathWeight(highlightedPath)
+  ReactDOM.render(React.createElement(Overlay, {path: highlightedPath, weight, isru, setIsru}), overlay)
 }
